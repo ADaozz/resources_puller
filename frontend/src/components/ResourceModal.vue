@@ -26,7 +26,8 @@ const visibleIds = computed(() => visible.value.map((group) => group.id))
 const allSelected = computed(() => visibleIds.value.length > 0 && visibleIds.value.every((id) => store.selected[id]))
 const selectedCount = computed(() => groups.value.filter((group) => store.selected[group.id]).length)
 const activeGroup = computed(() => groups.value.find((group) => group.id === activeGroupId.value) || null)
-const activeVariant = computed(() => (activeGroup.value ? currentVariant(activeGroup.value) : null))
+const previewGroup = computed(() => activeGroup.value || visible.value[0] || null)
+const previewVariant = computed(() => (previewGroup.value ? currentVariant(previewGroup.value) : null))
 
 function currentVariant(group: Group): Variant {
   const list = playable(group)
@@ -72,9 +73,9 @@ function openPreview(group: Group) {
   showPreview.value = true
 }
 
-watch([activeVariant, videoEl, showPreview, () => store.modalKind], async () => {
+watch([previewVariant, videoEl, () => store.modalKind], async () => {
   await nextTick()
-  if (showPreview.value) bindPlayer(activeVariant.value)
+  bindPlayer(previewVariant.value)
 })
 watch(
   () => store.modalKind,
@@ -135,20 +136,7 @@ function downloadSelected() {
           共 {{ visible.length }} 项
         </button>
       </div>
-      <div v-if="showPreview && activeVariant" class="preview" data-testid="preview">
-        <img v-if="store.modalKind === 'image'" :src="store.previewUrl(activeVariant.id)" alt="" />
-        <video v-else ref="videoEl" controls playsinline />
-        <select
-          v-if="store.modalKind === 'video' && activeVariant.renditions.length > 1"
-          :value="rendition[activeVariant.id] ?? 0"
-          @change="rendition[activeVariant.id] = Number(($event.target as HTMLSelectElement).value)"
-        >
-          <option v-for="(item, index) in activeVariant.renditions" :key="`${item.label}-${index}`" :value="index">
-            {{ item.label }}
-          </option>
-        </select>
-      </div>
-      <div v-else class="preview preview-idle" data-testid="preview"></div>
+      <div class="modal-body">
       <div class="grid">
         <article
           v-for="group in visible"
@@ -205,6 +193,25 @@ function downloadSelected() {
           </div>
         </article>
         <p v-if="!visible.length" class="grid-empty">没有匹配的资源</p>
+      </div>
+      <aside class="preview-pane" :class="{ open: showPreview }">
+        <div class="preview" data-testid="preview">
+          <template v-if="previewVariant">
+            <img v-if="store.modalKind === 'image'" :src="store.previewUrl(previewVariant.id)" alt="" />
+            <video v-else ref="videoEl" controls playsinline />
+            <p class="file-name">{{ previewGroup ? fileName(previewGroup) : "" }}</p>
+            <select
+              v-if="store.modalKind === 'video' && previewVariant.renditions.length > 1"
+              :value="rendition[previewVariant.id] ?? 0"
+              @change="rendition[previewVariant.id] = Number(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="(item, index) in previewVariant.renditions" :key="`${item.label}-${index}`" :value="index">
+                {{ item.label }}
+              </option>
+            </select>
+          </template>
+        </div>
+      </aside>
       </div>
       <footer>
         <p>
