@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from "vue"
+import { computed, onMounted } from "vue"
 import BrowserViewport from "./components/BrowserViewport.vue"
 import CaptureLog from "./components/CaptureLog.vue"
 import DownloadTray from "./components/DownloadTray.vue"
@@ -12,22 +12,25 @@ const store = useSessionStore()
 onMounted(() => {
   void store.boot()
 })
+
+const captureLabel = computed(() => (store.wsState === "open" ? "捕获中" : store.wsLabel))
 </script>
 
 <template>
   <div class="app">
-    <header class="top">
-      <div class="brand">
-        <strong>网页媒体资源解析器</strong>
-        <span>同一 Chromium 会话</span>
-        <span data-testid="pid">进程 {{ store.browserPid ?? "—" }}</span>
-        <span data-testid="ws">{{ store.wsLabel }}</span>
-        <button type="button" class="ghost" @click="store.trayOpen = !store.trayOpen">下载</button>
-      </div>
-      <UrlBar />
-      <p v-if="store.error" class="error" data-testid="error">{{ store.error }}</p>
-    </header>
-    <BrowserViewport />
+    <UrlBar />
+    <p v-if="store.error" class="error" data-testid="error">{{ store.error }}</p>
+    <section class="browser-card">
+      <header class="browser-head">
+        <h1>目标浏览器</h1>
+        <p class="live" :data-state="store.wsState">
+          <i></i>
+          <span data-testid="ws">{{ captureLabel }}</span>
+          <span data-testid="pid">{{ store.browserPid ?? "—" }}</span>
+        </p>
+      </header>
+      <BrowserViewport />
+    </section>
     <section class="decks">
       <MediaDeck kind="image" />
       <MediaDeck kind="video" />
