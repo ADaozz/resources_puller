@@ -59,6 +59,18 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(registry.owns_media("https://r1.googlevideo.com/videoplayback?range=0-100", PAGE))
         self.assertFalse(registry.owns_media("https://googlevideo.com.evil.example/videoplayback", PAGE))
 
+    def test_chromium_tree_without_proc_children(self):
+        from app.browser.manager import descendant_has_chromium
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for pid, parent, name in [(10, 1, "browser"), (11, 10, "worker"), (12, 11, "chrome"), (20, 1, "other")]:
+                entry = root / str(pid)
+                entry.mkdir()
+                (entry / "stat").write_text(f"{pid} ({name}) S {parent} 0 0")
+                (entry / "cmdline").write_bytes(name.encode())
+            self.assertTrue(descendant_has_chromium(10, root))
+            self.assertFalse(descendant_has_chromium(20, root))
+
     def test_audio_pairing_drm_and_silent_tracks(self):
         resources = self.adapter.resources(video_info(), PAGE, "jNQXAC9IVRw")
         self.assertEqual(len(resources), 2)

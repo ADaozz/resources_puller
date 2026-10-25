@@ -58,9 +58,21 @@ def _json_ready(value):
     return str(value)
 
 
-def descendant_has_chromium(pid: int | None) -> bool:
+def descendant_has_chromium(pid: int | None, proc_root: Path = Path("/proc")) -> bool:
     if not pid:
         return False
+    # Some container kernels omit /proc/<pid>/task/<pid>/children. Build the
+    # parent map from stat, which is also available in those environments.
+    children: dict[int, list[int]] = {}
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            parent = int(fields[1])
+            children.setdefault(parent, []).append(int(entry.name))
+        except (OSError, ValueError, IndexError):
+            continue
     stack = [pid]
     seen: set[int] = set()
     while stack:
@@ -68,21 +80,14 @@ def descendant_has_chromium(pid: int | None) -> bool:
         if current in seen:
             continue
         seen.add(current)
-        children_path = Path(f"/proc/{current}/task/{current}/children")
-        cmdline_path = Path(f"/proc/{current}/cmdline")
+        cmdline_path = proc_root / str(current) / "cmdline"
         try:
             cmdline = cmdline_path.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").lower()
         except OSError:
             cmdline = ""
         if current != pid and ("chrom" in cmdline):
             return True
-        try:
-            raw = children_path.read_text()
-        except OSError:
-            continue
-        for part in raw.split():
-            if part.isdigit():
-                stack.append(int(part))
+        stack.extend(children.get(current, []))
     return False
 
 NOVNC_URL = (
