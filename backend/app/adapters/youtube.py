@@ -4,18 +4,15 @@ import re
 from urllib.parse import parse_qs, urlsplit
 
 from app.adapters.base import MediaResource
-from app.media.extractor import Extractor
+from app.adapters.extracted import ExtractedVideoAdapter
 
 _VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
-_FORMAT_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "www.youtube-nocookie.com", "youtube-nocookie.com"}
 
 
-class YouTubeAdapter:
+class YouTubeAdapter(ExtractedVideoAdapter):
     name = "youtube"
-
-    def __init__(self, extractor: Extractor):
-        self.extractor = extractor
+    display_name = "YouTube"
 
     def page_key(self, url: str) -> str | None:
         parts = urlsplit(url)
@@ -51,33 +48,3 @@ class YouTubeAdapter:
         canonical = f"https://www.youtube.com/watch?v={video_id}"
         info = await self.extractor.inspect(canonical, cookies)
         return self.resources(info, canonical, video_id)
-
-    def resources(self, info: dict, page_url: str, video_id: str) -> list[MediaResource]:
-        if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
-            raise ValueError("暂不支持录制 YouTube 直播，请选择已结束的视频")
-        formats = [fmt for fmt in info.get("formats", []) if not fmt.get("has_drm")]
-        audio = [fmt for fmt in formats if fmt.get("vcodec") == "none" and fmt.get("acodec") not in {None, "none"}]
-        result = []
-        for fmt in formats:
-            format_id = str(fmt.get("format_id", ""))
-            if (not _FORMAT_ID.fullmatch(format_id) or fmt.get("vcodec") in {None, "none"}
-                    or not fmt.get("url") or fmt.get("protocol") in {"mhtml", "images"}):
-                continue
-            has_audio = fmt.get("acodec") not in {None, "none"}
-            if not has_audio and not audio:
-                continue  # Never advertise silent tracks as complete video downloads.
-            selector = format_id if has_audio else f"{format_id}+bestaudio[ext=m4a]/{format_id}+bestaudio"
-            height = fmt.get("height")
-            label = f"{height}p" if height else str(fmt.get("format_note") or format_id)
-            label += f" · {fmt.get('ext') or 'video'} · {format_id}"
-            result.append(MediaResource(
-                key=f"youtube:{video_id}:{format_id}", group_key=f"video|youtube|{video_id}",
-                title=info.get("title") or video_id, url=fmt["url"], label=label,
-                width=fmt.get("width"), height=height,
-                metadata={"backend": "extractor", "adapter": self.name, "source_url": page_url,
-                          "selector": selector, "format_id": format_id, "video_id": video_id,
-                          "ext": "mp4", "file_preview": True, "thumbnail": info.get("thumbnail")},
-            ))
-        if not result:
-            raise ValueError("没有可下载的完整音视频格式，请确认视频可播放并重新打开页面")
-        return result

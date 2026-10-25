@@ -213,6 +213,7 @@ class BrowserService:
         self._capture_tasks: set[asyncio.Task] = set()
         self._capture_key: tuple[str, str] | None = None
         self.adapter_status: dict | None = None
+        self._pending_media: dict[str, dict] = {}
         self._closing_session = False
         downloads.cookie_provider = self.cookies
 
@@ -319,6 +320,7 @@ class BrowserService:
         self._capture_task = None
         self._capture_key = None
         self.adapter_status = None
+        self._pending_media.clear()
         await self.downloads.cancel_session(session_id)
         markers = []
         try:
@@ -438,8 +440,11 @@ class BrowserService:
             return
         if self._capture_task:
             self._capture_task.cancel()
+        self._flush_pending_media(session_id)
         self._capture_key = key
         if adapter:
+            self._set_adapter_status(session_id, {"state": "loading", "adapter": adapter.name,
+                                                  "message": "正在解析视频清晰度…"})
             self._capture_task = asyncio.create_task(self._capture_page(session_id, url, adapter))
             self._capture_tasks.add(self._capture_task)
             self._capture_task.add_done_callback(self._capture_tasks.discard)
@@ -448,11 +453,34 @@ class BrowserService:
 
     def _set_adapter_status(self, session_id: str, status: dict | None) -> None:
         self.adapter_status = status
+        state = (status or {}).get("state")
+        if state == "ready":
+            self._pending_media.clear()
+        elif state == "error":
+            self._flush_pending_media(session_id)
         self.hub.publish(session_id, {"type": "adapter.status", "adapter_status": status})
 
+    def _flush_pending_media(self, session_id: str) -> None:
+        pending, self._pending_media = self._pending_media, {}
+        for payload in pending.values():
+            self.store.ingest(session_id, **payload)
+
+    def _ingest_capture(self, session_id: str, **payload) -> None:
+        page_url = self.session.current_url if self.session else ""
+        if self.adapters.owns_media(payload["url"], page_url):
+            state = (self.adapter_status or {}).get("state")
+            if state == "ready":
+                return
+            if state == "loading":
+                self._pending_media[payload["url"]] = payload
+                if len(self._pending_media) > 128:
+                    oldest = next(iter(self._pending_media))
+                    self.store.ingest(session_id, **self._pending_media.pop(oldest))
+                return
+        # Extraction failures must not hide streams that the browser can play.
+        self.store.ingest(session_id, **payload)
+
     async def _capture_page(self, session_id: str, url: str, adapter: SiteAdapter) -> None:
-        self._set_adapter_status(session_id, {"state": "loading", "adapter": adapter.name,
-                                              "message": "正在解析视频清晰度…"})
         try:
             # Let navigation/SPA transitions settle before reading browser cookies.
             await asyncio.sleep(0.5)
@@ -476,8 +504,6 @@ class BrowserService:
         url = payload.get("url")
         if not isinstance(url, str):
             return
-        if self.adapters.owns_media(url, self.session.current_url if self.session else ""):
-            return
         tag = str(payload.get("tag") or "")
         if tag in {"IMG", "SRCSET", "CSS"}:
             hint = "image"
@@ -486,15 +512,13 @@ class BrowserService:
         else:
             hint = None
         try:
-            self.store.ingest(session_id, url=url, mime=None, status=None, via="dom", hint=hint)
+            self._ingest_capture(session_id, url=url, mime=None, status=None, via="dom", hint=hint)
         except Exception:
             log.exception("DOM 资源入库失败")
 
     async def _on_response(self, session_id: str, response) -> None:
         try:
             url = response.url
-            if self.adapters.owns_media(url, self.session.current_url if self.session else ""):
-                return
             headers = response.headers
             mime = headers.get("content-type", "")
             kind = classify(url, mime)
@@ -506,7 +530,7 @@ class BrowserService:
                     body = await response.text()
                 except Exception:
                     body = ""
-            self.store.ingest(
+            self._ingest_capture(
                 session_id,
                 url=url,
                 mime=mime,

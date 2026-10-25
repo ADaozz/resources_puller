@@ -41,6 +41,15 @@ def public_error(text: str) -> str:
     # Never expose signed URLs or raw extractor output (which may include cookies).
     lowered = text.lower()
     messages = {
+        "certificate verify failed": "站点证书验证失败，请检查部署环境的 CA 证书配置",
+        "fresh cookies": "站点需要有效的浏览器 Cookie，请在目标浏览器打开视频并完成验证后刷新重试",
+        "412": "站点风控拒绝了请求（412），请在目标浏览器确认视频可播放后重试",
+        "rate limit": "站点请求过于频繁，请稍后重试",
+        "unable to extract initial state": "无法读取播放器信息，请在当前浏览器确认视频可播放后重试",
+        "geo-restricted": "视频已删除或在当前地区不可用，请在目标浏览器确认可播放后重试",
+        "captcha": "站点要求验证码，请在目标浏览器完成验证后刷新重试",
+        "login": "视频需要登录，请在当前浏览器登录后刷新重试",
+        "log in": "视频需要登录，请在当前浏览器登录后刷新重试",
         "403": "上游拒绝访问（403）；请检查网络出口或在浏览器中重新打开视频",
         "sign in": "视频要求登录或人机验证，请先在当前浏览器中完成验证后重试",
         "private video": "该视频为私有视频，当前会话无权访问",
@@ -54,7 +63,10 @@ def public_error(text: str) -> str:
 
 class Extractor:
     def arguments(self, cookie_path: Path) -> list[str]:
+        # Use the deployment's system CA bundle, including its configured proxy
+        # CA. TLS verification stays enabled; certifi would ignore that bundle.
         return [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
+                "--compat-options", "no-certifi",
                 "--no-cache-dir", "--no-warnings", "--socket-timeout", "15",
                 "--retries", "2", "--fragment-retries", "2", "--js-runtimes", "node",
                 "--cookies", str(cookie_path)]
