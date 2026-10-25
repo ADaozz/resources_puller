@@ -6,6 +6,21 @@ from app.security.ssrf import assert_safe
 
 _TIMEOUT = httpx.Timeout(connect=8.0, read=120.0, write=20.0, pool=8.0)
 _REDIRECTS = {301, 302, 303, 307, 308}
+# 不少公开 CDN 会拒绝 python-httpx 这类默认标识，服务端预览和下载改用浏览器标识。
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+}
+
+
+def _merge_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    merged = dict(_DEFAULT_HEADERS)
+    if headers:
+        merged.update(headers)
+    return merged
 
 
 async def open_response(
@@ -17,10 +32,11 @@ async def open_response(
     """手动跟随重定向，每一跳都重新做 SSRF 检查。调用方负责关闭 client。"""
     client = httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT)
     current = url
+    request_headers = _merge_headers(headers)
     try:
         for _ in range(6):
             assert_safe(current)
-            request = client.build_request(method, current, headers=headers)
+            request = client.build_request(method, current, headers=request_headers)
             response = await client.send(request, stream=True)
             if response.status_code in _REDIRECTS:
                 location = response.headers.get("location")
