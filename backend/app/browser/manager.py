@@ -90,6 +90,9 @@ NOVNC_URL = (
 
 DOM_SCRIPT = r"""
 (() => {
+  try {
+    Object.defineProperty(Navigator.prototype, "webdriver", { get: () => undefined });
+  } catch (error) {}
   if (window.__rpDomInstalled) return;
   window.__rpDomInstalled = true;
   const seen = new Set();
@@ -174,6 +177,7 @@ CHROMIUM_ARGS = [
     "--start-maximized",
     "--force-device-scale-factor=1",
     "--lang=zh-CN",
+    "--disable-blink-features=AutomationControlled",
 ]
 
 
@@ -209,6 +213,7 @@ class BrowserService:
         self.browser = await self.playwright.chromium.launch(
             headless=False,
             args=CHROMIUM_ARGS,
+            ignore_default_args=["--enable-automation"],
         )
         fresh = [pid for pid in main_chromium_pids() if pid not in before]
         self._chromium_pid = fresh[0] if fresh else (main_chromium_pids()[:1] or [None])[0]
@@ -244,6 +249,8 @@ class BrowserService:
         context = await self.browser.new_context(
             no_viewport=True,
             locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
             accept_downloads=False,
         )
         session_id = uuid.uuid4().hex
