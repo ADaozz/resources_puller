@@ -544,3 +544,6 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   }
   .tray { width: 480px; }
 }
+
+.adapter-status { margin: 0; padding: 8px 12px; color: #b7bac2; font-size: 13px; }
+.preview-hint { margin: 0; padding: 0 4px; color: #b7bac2; font-size: 12px; }

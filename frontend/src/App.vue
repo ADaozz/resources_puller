@@ -20,6 +20,9 @@ const captureLabel = computed(() => (store.wsState === "open" ? "捕获中" : st
   <div class="app">
     <UrlBar />
     <p v-if="store.error" class="error" data-testid="error">{{ store.error }}</p>
+    <p v-if="store.adapterStatus" role="status" class="adapter-status" :class="{ error: store.adapterStatus.state === 'error' }">
+      {{ store.adapterStatus.message }}
+    </p>
     <section class="browser-card">
       <header class="browser-head">
         <h1>目标浏览器</h1>

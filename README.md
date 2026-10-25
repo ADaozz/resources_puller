@@ -38,6 +38,29 @@ docker compose exec app python /app/scripts/verify.py
 python3 backend/tests/test_logic.py
 ```
 
+完整的后端回归（包括适配器和真实音视频合并；需安装 `backend/requirements.txt`、FFmpeg、Node.js 22）：
+
+```bash
+python3 -m unittest discover -s backend/tests -v
+```
+
+## YouTube
+
+在地址栏打开公开视频（支持 watch、youtu.be、Shorts、embed），视频格式解析完成后会出现在视频仓。按视频 ID 分组，清晰度/编码格式作为变体；播放器的零散分段请求不会另外计数。
+
+解析和下载使用独立的 `yt-dlp` 进程，共享当前 Chromium 会话中该站点的 Cookie，并继承部署环境的代理设置。每次下载重新解析原视频和所选格式，避免使用过期的 CDN 签名地址。独立视频轨会配对音轨，由 FFmpeg 合成 MP4；不会把单独的静音画面当作完整视频。
+
+首次点击预览会先下载并合并所选格式，进度和错误可在下载列表查看；完成后的文件支持 Range 预览，预览和下载复用同一任务。切换页面会取消未完成的格式解析，关闭会话会取消任务、删除临时 Cookie 和下载文件。需要登录或验证时，先在目标浏览器完成，再刷新页面重试。
+
+当前支持点播，不支持录制直播或下载 DRM 内容。站点风控、地区限制、账号权限及网络出口仍会影响可用性。开发环境对 YouTube 的访问被代理以 403 拒绝，因此线上 YouTube 端到端尚未验证；本地集成测试使用真实 `yt-dlp` / FFmpeg 下载独立音视频样例，检查合并后的双轨 MP4 和 Range 预览，不能替代线上验证。
+
+### 扩展站点和下载后端
+
+- `backend/app/adapters/base.py` 定义站点协议和注册表；在 `adapters/__init__.py` 注册适配器。实现页面识别、Cookie 作用域、媒体请求归属和资源解析，不需要改浏览器里的站点分支。
+- 适配器返回 `MediaResource`：稳定资源键、分组键、清晰度和无凭据的下载元数据。`Store.ingest_resolved()` 更新已有资源地址，保留选择使用的 ID。
+- `backend/app/media/backends.py` 根据下载计划分发后端；`DownloadManager` 注册 `http`、`playlist`、`extractor`。新增下载方式通过 `register()` 接入，核心任务生命周期不识别站点名称。
+- `media/extractor.py` 封装提取进程、私有 Cookie 临时文件、进度、超时及整个进程组的取消。运行时依赖版本固定在 `requirements.txt`；YouTube 规则变化时需升级 `yt-dlp` 并重新回归。
+
 ## 接口
 
 - `POST /api/sessions`：创建或返回当前唯一会话

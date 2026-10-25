@@ -11,6 +11,7 @@ const query = ref("")
 const videoEl = ref<HTMLVideoElement | null>(null)
 const activeGroupId = ref<string | null>(null)
 const showPreview = ref(false)
+const previewError = ref(false)
 let hls: Hls | null = null
 
 const groups = computed(() =>
@@ -41,6 +42,7 @@ function resolutionText(group: Group) {
 function fileName(group: Group) {
   const variant = currentVariant(group)
   try {
+    if (variant.adapter) return group.title
     const base = decodeURIComponent(new URL(variant.url).pathname.split("/").pop() || "")
     if (base) return base
   } catch {
@@ -58,6 +60,12 @@ function bindPlayer(variant: Variant | null) {
   hls?.destroy()
   hls = null
   if (!video || !variant || store.modalKind !== "video") return
+  previewError.value = false
+  if (variant.file_preview && !showPreview.value) {
+    video.removeAttribute("src")
+    video.load()
+    return
+  }
   const src = store.previewUrl(variant.id)
   if (isM3u8(variant) && Hls.isSupported()) {
     hls = new Hls()
@@ -73,7 +81,7 @@ function openPreview(group: Group) {
   showPreview.value = true
 }
 
-watch([previewVariant, videoEl, () => store.modalKind], async () => {
+watch([previewVariant, videoEl, showPreview, () => store.modalKind], async () => {
   await nextTick()
   bindPlayer(previewVariant.value)
 })
@@ -199,8 +207,12 @@ function downloadSelected() {
           <template v-if="previewVariant">
             <div class="preview-frame">
               <img v-if="store.modalKind === 'image'" :src="store.previewUrl(previewVariant.id)" alt="" />
-              <video v-else ref="videoEl" controls playsinline />
+              <video v-else ref="videoEl" controls playsinline @error="previewError = true" />
             </div>
+            <p v-if="previewVariant.file_preview" class="preview-hint">
+              {{ showPreview ? "首次预览需下载并合并，可在下载列表查看进度。" : "点击预览后开始下载并合并所选清晰度。" }}
+            </p>
+            <p v-if="previewError" role="alert" class="preview-hint">预览失败，请查看下载列表中的原因，重新打开页面后重试。</p>
             <p class="file-name">{{ previewGroup ? fileName(previewGroup) : "" }}</p>
             <select
               v-if="store.modalKind === 'video' && previewVariant.renditions.length > 1"

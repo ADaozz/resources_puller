@@ -159,7 +159,7 @@ async def create_downloads(session_id: str, body: DownloadIn, request: Request) 
         if not variant:
             raise HTTPException(404, f"找不到资源版本 {item.variant_id}")
         try:
-            assert_safe(variant["url"])
+            assert_safe(variant.get("metadata", {}).get("source_url") or variant["url"])
         except SSRFError as exc:
             raise HTTPException(400, str(exc)) from exc
         created.append(
@@ -200,6 +200,12 @@ async def preview(session_id: str, variant_id: str, request: Request):
     variant = _store(request).get_variant(session_id, variant_id)
     if not variant:
         raise HTTPException(404, "资源不存在")
+    try:
+        prepared = await _downloads(request).preview_file(session_id, variant)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if prepared:
+        return FileResponse(prepared, media_type="video/mp4")
     url = variant["url"]
     try:
         assert_safe(url)
@@ -226,7 +232,8 @@ async def poster(session_id: str, variant_id: str, request: Request):
     variant = _store(request).get_variant(session_id, variant_id)
     if not variant:
         raise HTTPException(404, "资源不存在")
-    path = await ensure_poster(variant["url"], variant_id, headers=_page_headers(request, session_id))
+    source = variant.get("metadata", {}).get("thumbnail") or variant["url"]
+    path = await ensure_poster(source, variant_id, headers=_page_headers(request, session_id))
     if not path:
         raise HTTPException(404, "暂无封面")
     return FileResponse(path, media_type="image/jpeg")
