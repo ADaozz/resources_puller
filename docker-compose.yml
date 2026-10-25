@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    shm_size: "1gb"
+    init: true
+    environment:
+      DISPLAY: ":99"
+      SELF_PORTS: "8080,8000"
+      DEMO_MEDIA_DIR: "/app/demo-media"
+      DATA_DIR: "/data"
+      PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright"
