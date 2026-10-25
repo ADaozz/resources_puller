@@ -5,9 +5,7 @@ import hashlib
 import hmac
 import time
 from pathlib import Path
-from urllib.parse import quote
-
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
@@ -31,6 +29,16 @@ def _safe_media(relative: str) -> Path:
     return path
 
 
+def _resolve_media(relative: str) -> Path:
+    try:
+        return _safe_media(relative)
+    except HTTPException:
+        base = relative.split("@", 1)[0]
+        if base and base != relative:
+            return _safe_media(base)
+        raise
+
+
 def sign_name(name: str, exp: int) -> str:
     message = f"{name}|{exp}".encode()
     return hmac.new(sign_secret(), message, hashlib.sha256).hexdigest()
@@ -46,7 +54,7 @@ def local_media_file(url: str) -> Path | None:
     if not parts.path.startswith(prefix):
         return None
     try:
-        return _safe_media(parts.path[len(prefix) :])
+        return _resolve_media(unquote(parts.path[len(prefix) :]))
     except HTTPException:
         return None
 
@@ -89,6 +97,12 @@ def _page(valid: str, expired: str) -> str:
       <img alt="360" src="/demo/media/coast_640x360.jpg" />
       <img alt="720" src="/demo/media/coast_1280x720.jpg" />
       <img alt="1080" src="/demo/media/coast_1920x1080.jpg" />
+    </section>
+    <section>
+      <h2>同一名称的处理后缀</h2>
+      <img alt="banner-wide" src="/demo/media/banner.jpg@3840w_360h_1c.avif" />
+      <img alt="banner-cover" src="/demo/media/banner.jpg@672w_378h_1c_!web-home-common-cover.webp" />
+      <img alt="banner-mid" src="/demo/media/banner.jpg@1280w_720h_1c" />
     </section>
     <section>
       <h2>不同目录同名</h2>
@@ -165,7 +179,7 @@ def slow_page() -> HTMLResponse:
 def demo_media(path: str) -> FileResponse:
     if path.startswith("slow"):
         raise HTTPException(404, "文件不存在")
-    return FileResponse(_safe_media(path))
+    return FileResponse(_resolve_media(path))
 
 
 @router.get("/demo/signed/{name}")

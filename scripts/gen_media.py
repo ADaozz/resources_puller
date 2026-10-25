@@ -70,6 +70,7 @@ def main() -> None:
     image(root / "lazy.jpg", "0x9B59B6", "300x200", "lazy")
     image(root / "clicked.png", "0xE74C3C", "400x300", "clicked")
     image(root / "signed_photo.jpg", "0x1ABC9C", "360x240", "signed")
+    image(root / "banner.jpg", "0x3D8BFF", "960x160", "banner")
 
     clip = root / "clip.mp4"
     run(

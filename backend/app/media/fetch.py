@@ -23,6 +23,16 @@ def _merge_headers(headers: dict[str, str] | None) -> dict[str, str]:
     return merged
 
 
+def page_request_headers(page_url: str | None) -> dict[str, str]:
+    """预览和下载沿用资源所在页面的来源，避免公开 CDN 因缺少 Referer 返回 403。"""
+    if not page_url:
+        return {}
+    cleaned = page_url.replace("\r", "").replace("\n", "").strip()
+    if not cleaned.startswith(("http://", "https://")):
+        return {}
+    return {"Referer": cleaned}
+
+
 async def open_response(
     url: str,
     *,
@@ -56,8 +66,12 @@ async def open_response(
         raise
 
 
-async def read_text(url: str, limit: int = 2_000_000) -> tuple[str, str]:
-    client, response, final = await open_response(url)
+async def read_text(
+    url: str,
+    limit: int = 2_000_000,
+    headers: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    client, response, final = await open_response(url, headers=headers)
     try:
         if response.status_code >= 400:
             body = (await response.aread())[:300]

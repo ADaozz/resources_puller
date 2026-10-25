@@ -197,8 +197,10 @@ function downloadSelected() {
       <aside class="preview-pane" :class="{ open: showPreview }">
         <div class="preview" data-testid="preview">
           <template v-if="previewVariant">
-            <img v-if="store.modalKind === 'image'" :src="store.previewUrl(previewVariant.id)" alt="" />
-            <video v-else ref="videoEl" controls playsinline />
+            <div class="preview-frame">
+              <img v-if="store.modalKind === 'image'" :src="store.previewUrl(previewVariant.id)" alt="" />
+              <video v-else ref="videoEl" controls playsinline />
+            </div>
             <p class="file-name">{{ previewGroup ? fileName(previewGroup) : "" }}</p>
             <select
               v-if="store.modalKind === 'video' && previewVariant.renditions.length > 1"

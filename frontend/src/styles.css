@@ -319,21 +319,37 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .total-pill { padding: 0 14px; white-space: nowrap; }
 .modal-body { display: flex; flex-direction: column; min-height: 0; gap: 12px; overflow: hidden; }
 .preview-pane { display: none; min-height: 0; }
-.preview-pane.open { display: block; }
+.preview-pane.open { display: flex; flex-direction: column; min-height: 0; }
 .preview {
   border-radius: 16px;
-  background: #000;
+  background: transparent;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-.preview img, .preview video {
-  width: 100%;
-  max-width: 100%;
-  max-height: 220px;
-  display: block;
+.preview-frame {
   background: #000;
-  object-fit: contain;
+  border-radius: 16px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 240px;
+  aspect-ratio: 4 / 3;
 }
-.preview .file-name { padding: 10px 12px 0; }
+.preview-frame img,
+.preview-frame video {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  background: transparent;
+  object-fit: contain;
+  object-position: center;
+}
+.preview .file-name { padding: 0 2px; }
 .preview select { margin: 8px; background: #2a2a2c; border: 0; border-radius: 8px; padding: 6px; }
 .grid {
   overflow: auto;
@@ -500,14 +516,26 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   .segments { max-width: 440px; }
   .modal-body {
     display: grid;
-    grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.8fr);
+    grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.85fr);
+    grid-template-rows: minmax(320px, 1fr);
     flex: 1;
+    min-height: 0;
+    align-items: stretch;
   }
-  .preview-pane { display: flex; }
-  .preview { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  .preview { min-height: 0; }
-  .preview img, .preview video { flex: 1; width: 100%; height: 100%; max-height: 100%; min-height: 0; object-fit: contain; }
-  .grid { align-content: start; }
+  .preview-pane {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+  }
+  .preview { flex: 1; min-height: 0; height: 100%; }
+  .preview-frame {
+    flex: 1;
+    aspect-ratio: auto;
+    min-height: 320px;
+    height: auto;
+  }
+  .grid { align-content: start; min-height: 0; }
 
   .tray-back {
     justify-content: end;

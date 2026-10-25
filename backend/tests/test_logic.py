@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.db import DB
+from app.media.fetch import page_request_headers
 from app.hub import Hub
 from app.resources.classify import classify
 from app.resources.normalize import identity_for, normalize_stem
@@ -14,6 +15,17 @@ from app.resources.playlist import parse_m3u8, parse_mpd
 from app.resources.store import Store
 from app.security.ssrf import SSRFError, assert_safe, clear_cache, ip_allowed
 import ipaddress
+
+
+class PageHeaderTests(unittest.TestCase):
+    def test_http_page_becomes_referer(self) -> None:
+        headers = page_request_headers("https://www.douyin.com/jingxuan")
+        self.assertEqual(headers, {"Referer": "https://www.douyin.com/jingxuan"})
+
+    def test_blank_and_injected_lines_are_dropped(self) -> None:
+        self.assertEqual(page_request_headers(""), {})
+        self.assertEqual(page_request_headers("about:blank"), {})
+        self.assertEqual(page_request_headers("https://example.com/\r\nX-Evil: 1"), {"Referer": "https://example.com/X-Evil: 1"})
 
 
 class NormalizeTests(unittest.TestCase):
@@ -34,6 +46,33 @@ class NormalizeTests(unittest.TestCase):
         stem_v, label_v, _w, _h = normalize_stem("photo_v2")
         self.assertEqual(stem_v, "photo_v2")
         self.assertIsNone(label_v)
+
+    def test_processor_suffix_merges_formats_and_sizes(self) -> None:
+        base = "https://cdn.example/bfs/app/58a4e1f9a4ad2fc524858e317a8b3e0c4c34f512.jpg"
+        avif = identity_for(base + "@3840w_360h_1c.avif", "image")
+        webp = identity_for(base + "@3840w_360h_1c.webp", "image")
+        sized = identity_for(base + "@672w_378h_1c_!web-home-common-cover.webp", "image")
+        bare = identity_for(base + "@1280w_720h_1c", "image")
+        self.assertEqual(avif[0], webp[0])
+        self.assertEqual(avif[0], sized[0])
+        self.assertEqual(avif[0], bare[0])
+        self.assertEqual(avif[1], "58a4e1f9a4ad2fc524858e317a8b3e0c4c34f512")
+        self.assertEqual(avif[2], "3840x360")
+        self.assertEqual(sized[2], "672x378")
+        self.assertEqual((sized[3], sized[4]), (672, 378))
+        other = identity_for(
+            "https://cdn.example/bfs/app/otherhash.jpg@672w_378h_1c.webp",
+            "image",
+        )
+        self.assertNotEqual(avif[0], other[0])
+        other_host = identity_for(
+            "https://img2.example/bfs/app/58a4e1f9a4ad2fc524858e317a8b3e0c4c34f512.jpg@672w_378h.webp",
+            "image",
+        )
+        self.assertNotEqual(avif[0], other_host[0])
+        left = identity_for("https://cdn.example/a/report@2024.jpg", "image")
+        right = identity_for("https://cdn.example/a/report@2025.jpg", "image")
+        self.assertNotEqual(left[0], right[0])
 
     def test_directory_is_part_of_identity(self) -> None:
         left = identity_for("http://127.0.0.1:8080/demo/media/a/cover.jpg", "image")
@@ -189,6 +228,27 @@ class StoreTests(unittest.TestCase):
         self.assertIn("720p", labels)
         urls = [variant["url"] for group in groups for variant in group["variants"]]
         self.assertFalse(any(url.endswith(".ts") for url in urls))
+        banner = "https://cdn.example/bfs/app/58a4e1f9.jpg"
+        for suffix in (
+            "@3840w_360h_1c.avif",
+            "@672w_378h_1c_!web-home-common-cover.webp",
+            "@1280w_720h_1c",
+        ):
+            self.store.ingest(
+                "s1",
+                url=banner + suffix,
+                mime="image/jpeg",
+                status=200,
+                via="network",
+            )
+        groups = self.store.list_groups("s1")
+        banners = [group for group in groups if group["title"] == "58a4e1f9"]
+        self.assertEqual(len(banners), 1)
+        self.assertEqual(len(banners[0]["variants"]), 3)
+        self.assertEqual(
+            {variant["label"] for variant in banners[0]["variants"]},
+            {"3840x360", "672x378", "1280x720"},
+        )
 
     def test_late_master_absorbs_media_playlist(self) -> None:
         base = "http://127.0.0.1:8080/demo/media/hls"
