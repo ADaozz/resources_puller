@@ -30,7 +30,11 @@ async def open_response(
     headers: dict[str, str] | None = None,
 ) -> tuple[httpx.AsyncClient, httpx.Response, str]:
     """手动跟随重定向，每一跳都重新做 SSRF 检查。调用方负责关闭 client。"""
-    client = httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT)
+    client = httpx.AsyncClient(
+        follow_redirects=False,
+        timeout=_TIMEOUT,
+        headers={"Accept-Encoding": "identity"},
+    )
     current = url
     request_headers = _merge_headers(headers)
     try:
