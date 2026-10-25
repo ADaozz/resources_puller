@@ -6,6 +6,7 @@ import time
 import uuid
 from urllib.parse import urldefrag
 
+from app.adapters.base import MediaResource
 from app.db import DB
 from app.hub import Hub
 from app.resources.classify import classify
@@ -122,6 +123,41 @@ class Store:
                 group_key=None,
                 title=None,
             )
+
+    def ingest_resolved(self, session_id: str, resources: list[MediaResource]) -> None:
+        """Persist adapter renditions under stable keys, refreshing expiring URLs."""
+        with self._lock:
+            if session_id not in self._urls:
+                return
+            for resource in resources:
+                group_id, new_group = self._ensure_group(
+                    session_id, resource.group_key, "video", resource.title,
+                )
+                self.db.execute("UPDATE groups SET title=? WHERE id=?", (resource.title[:120], group_id))
+                row = self.db.query_one(
+                    "SELECT id, url FROM variants WHERE group_id=? AND source_key=?",
+                    (group_id, resource.key),
+                )
+                created = row is None
+                variant_id = row["id"] if row else uuid.uuid4().hex
+                if row:
+                    self._urls[session_id].pop(row["url"], None)
+                    self.db.execute(
+                        "UPDATE variants SET url=?, mime=?, width=?, height=?, label=?, metadata=? WHERE id=?",
+                        (resource.url, resource.mime, resource.width, resource.height, resource.label,
+                         json.dumps(resource.metadata), variant_id),
+                    )
+                else:
+                    self.db.execute(
+                        "INSERT INTO variants(id,group_id,url,mime,width,height,label,is_playlist,renditions,created_at,source_key,metadata) "
+                        "VALUES(?,?,?,?,?,?,?,0,NULL,?,?,?)",
+                        (variant_id, group_id, resource.url, resource.mime, resource.width, resource.height,
+                         resource.label, time.time(), resource.key, json.dumps(resource.metadata)),
+                    )
+                self._remember(session_id, resource.url, variant_id)
+                self._add_occurrence(variant_id, resource.url, resource.mime, None, "adapter")
+                self._emit_group(session_id, group_id, new_group, created and not new_group,
+                                 self._last_occurrence(variant_id))
 
     def _ingest_playlist(
         self,
@@ -502,6 +538,7 @@ class Store:
             if not row:
                 return None
             data = dict(row)
+            data["metadata"] = json.loads(data.get("metadata") or "{}")
             data["is_playlist"] = bool(data["is_playlist"])
             data["renditions"] = json.loads(data["renditions"]) if data.get("renditions") else []
             return data
@@ -534,6 +571,7 @@ class Store:
             "SELECT * FROM variants WHERE group_id=? ORDER BY created_at ASC",
             (group_id,),
         ):
+            metadata = json.loads(row["metadata"] or "{}")
             count = self.db.query_one(
                 "SELECT COUNT(*) AS n FROM occurrences WHERE variant_id=?",
                 (row["id"],),
@@ -549,6 +587,8 @@ class Store:
                     "is_playlist": bool(row["is_playlist"]),
                     "renditions": json.loads(row["renditions"]) if row["renditions"] else [],
                     "occurrence_count": int(count["n"] if count else 0),
+                    "adapter": metadata.get("adapter"),
+                    "file_preview": bool(metadata.get("file_preview")),
                 }
             )
         variants.sort(key=lambda item: ((item["width"] or 0) * (item["height"] or 0)), reverse=True)

@@ -17,6 +17,8 @@ from pathlib import Path
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
+from app.adapters import default_registry
+from app.adapters.base import SiteAdapter
 from app.config import SCREEN_H, SCREEN_W
 from app.hub import Hub
 from app.media.pipeline import DownloadManager
@@ -56,9 +58,21 @@ def _json_ready(value):
     return str(value)
 
 
-def descendant_has_chromium(pid: int | None) -> bool:
+def descendant_has_chromium(pid: int | None, proc_root: Path = Path("/proc")) -> bool:
     if not pid:
         return False
+    # Some container kernels omit /proc/<pid>/task/<pid>/children. Build the
+    # parent map from stat, which is also available in those environments.
+    children: dict[int, list[int]] = {}
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            parent = int(fields[1])
+            children.setdefault(parent, []).append(int(entry.name))
+        except (OSError, ValueError, IndexError):
+            continue
     stack = [pid]
     seen: set[int] = set()
     while stack:
@@ -66,21 +80,14 @@ def descendant_has_chromium(pid: int | None) -> bool:
         if current in seen:
             continue
         seen.add(current)
-        children_path = Path(f"/proc/{current}/task/{current}/children")
-        cmdline_path = Path(f"/proc/{current}/cmdline")
+        cmdline_path = proc_root / str(current) / "cmdline"
         try:
             cmdline = cmdline_path.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").lower()
         except OSError:
             cmdline = ""
         if current != pid and ("chrom" in cmdline):
             return True
-        try:
-            raw = children_path.read_text()
-        except OSError:
-            continue
-        for part in raw.split():
-            if part.isdigit():
-                stack.append(int(part))
+        stack.extend(children.get(current, []))
     return False
 
 NOVNC_URL = (
@@ -201,6 +208,14 @@ class BrowserService:
         self.launch_count = 0
         self._chromium_pid: int | None = None
         self.blocked: list[dict] = []
+        self.adapters = default_registry(downloads.extractor)
+        self._capture_task: asyncio.Task | None = None
+        self._capture_tasks: set[asyncio.Task] = set()
+        self._capture_key: tuple[str, str] | None = None
+        self.adapter_status: dict | None = None
+        self._pending_media: dict[str, dict] = {}
+        self._closing_session = False
+        downloads.cookie_provider = self.cookies
 
     @property
     def browser_pid(self) -> int | None:
@@ -239,6 +254,7 @@ class BrowserService:
             "downloads": downloads,
             "current_url": self.session.current_url if self.session and self.session.id == session_id else "",
             "browser_pid": self.browser_pid,
+            "adapter_status": self.adapter_status,
         }
 
     async def create_session(self) -> dict:
@@ -254,6 +270,7 @@ class BrowserService:
             accept_downloads=False,
         )
         session_id = uuid.uuid4().hex
+        self._closing_session = False
         self.store.create_session(session_id)
 
         async def on_dom(_source, payload):
@@ -275,6 +292,7 @@ class BrowserService:
             "framenavigated",
             lambda frame, sid=session_id: self._on_navigated(sid, frame),
         )
+        page.on("domcontentloaded", lambda: self._schedule_capture(session_id, page.url, refresh=True))
         self.session = LiveSession(id=session_id, context=context, page=page)
         await self._place_window(page)
         return self.describe()
@@ -294,6 +312,15 @@ class BrowserService:
     async def close_session(self, session_id: str) -> None:
         if not self.session or self.session.id != session_id:
             raise KeyError(session_id)
+        self._closing_session = True
+        for task in self._capture_tasks:
+            task.cancel()
+        await asyncio.gather(*self._capture_tasks, return_exceptions=True)
+        self._capture_tasks.clear()
+        self._capture_task = None
+        self._capture_key = None
+        self.adapter_status = None
+        self._pending_media.clear()
         await self.downloads.cancel_session(session_id)
         markers = []
         try:
@@ -394,6 +421,82 @@ class BrowserService:
             return
         self.session.current_url = frame.url
         self.hub.publish(session_id, {"type": "page.url", "url": frame.url})
+        self._schedule_capture(session_id, frame.url)
+
+    async def cookies(self, session_id: str, source_url: str) -> list[dict]:
+        if not self.session or self.session.id != session_id:
+            return []
+        adapter = self.adapters.for_page(source_url)
+        urls = adapter.cookie_urls(source_url) if adapter else [source_url]
+        return await self.session.context.cookies(urls)
+
+    def _schedule_capture(self, session_id: str, url: str, *, refresh: bool = False) -> None:
+        if self._closing_session or not self.session or self.session.id != session_id:
+            return
+        adapter = self.adapters.for_page(url)
+        key = (adapter.name, adapter.page_key(url)) if adapter else None
+        running = self._capture_task and not self._capture_task.done()
+        if key == self._capture_key and (running or not refresh):
+            return
+        if self._capture_task:
+            self._capture_task.cancel()
+        self._flush_pending_media(session_id)
+        self._capture_key = key
+        if adapter:
+            self._set_adapter_status(session_id, {"state": "loading", "adapter": adapter.name,
+                                                  "message": "正在解析视频清晰度…"})
+            self._capture_task = asyncio.create_task(self._capture_page(session_id, url, adapter))
+            self._capture_tasks.add(self._capture_task)
+            self._capture_task.add_done_callback(self._capture_tasks.discard)
+        else:
+            self._set_adapter_status(session_id, None)
+
+    def _set_adapter_status(self, session_id: str, status: dict | None) -> None:
+        self.adapter_status = status
+        state = (status or {}).get("state")
+        if state == "ready":
+            self._pending_media.clear()
+        elif state == "error":
+            self._flush_pending_media(session_id)
+        self.hub.publish(session_id, {"type": "adapter.status", "adapter_status": status})
+
+    def _flush_pending_media(self, session_id: str) -> None:
+        pending, self._pending_media = self._pending_media, {}
+        for payload in pending.values():
+            self.store.ingest(session_id, **payload)
+
+    def _ingest_capture(self, session_id: str, **payload) -> None:
+        page_url = self.session.current_url if self.session else ""
+        if self.adapters.owns_media(payload["url"], page_url):
+            state = (self.adapter_status or {}).get("state")
+            if state == "ready":
+                return
+            if state == "loading":
+                self._pending_media[payload["url"]] = payload
+                if len(self._pending_media) > 128:
+                    oldest = next(iter(self._pending_media))
+                    self.store.ingest(session_id, **self._pending_media.pop(oldest))
+                return
+        # Extraction failures must not hide streams that the browser can play.
+        self.store.ingest(session_id, **payload)
+
+    async def _capture_page(self, session_id: str, url: str, adapter: SiteAdapter) -> None:
+        try:
+            # Let navigation/SPA transitions settle before reading browser cookies.
+            await asyncio.sleep(0.5)
+            cookies = await self.cookies(session_id, url)
+            resources = await adapter.resolve(url, cookies)
+            self.store.ingest_resolved(session_id, resources)
+            self._set_adapter_status(session_id, {"state": "ready", "adapter": adapter.name,
+                                                  "message": f"已解析 {len(resources)} 个视频格式"})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Adapters return user-safe errors; avoid logging signed stream URLs.
+            from app.media.extractor import public_error
+            message = str(exc) if isinstance(exc, (RuntimeError, ValueError)) else public_error("")
+            self._set_adapter_status(session_id, {"state": "error", "adapter": adapter.name,
+                                                  "message": message[:300]})
 
     async def _on_dom(self, session_id: str, payload) -> None:
         if not isinstance(payload, dict):
@@ -409,7 +512,7 @@ class BrowserService:
         else:
             hint = None
         try:
-            self.store.ingest(session_id, url=url, mime=None, status=None, via="dom", hint=hint)
+            self._ingest_capture(session_id, url=url, mime=None, status=None, via="dom", hint=hint)
         except Exception:
             log.exception("DOM 资源入库失败")
 
@@ -427,7 +530,7 @@ class BrowserService:
                     body = await response.text()
                 except Exception:
                     body = ""
-            self.store.ingest(
+            self._ingest_capture(
                 session_id,
                 url=url,
                 mime=mime,

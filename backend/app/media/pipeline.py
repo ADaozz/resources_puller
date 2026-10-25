@@ -9,6 +9,8 @@ from pathlib import Path
 
 from app.config import data_dir
 from app.hub import Hub
+from app.media.backends import BackendRegistry, DownloadPlan, plan_for
+from app.media.extractor import Extractor
 from app.media.fetch import open_response, page_request_headers
 from app.resources.classify import extension_of
 from app.resources.store import Store
@@ -26,6 +28,14 @@ class DownloadManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancelled: set[str] = set()
         self._referers: dict[str, str] = {}
+        self._plans: dict[str, DownloadPlan] = {}
+        self._preview_jobs: dict[tuple[str, str], str] = {}
+        self.extractor = Extractor()
+        self.cookie_provider = None
+        self.backends = BackendRegistry()
+        self.backends.register("http", self._http_backend)
+        self.backends.register("playlist", self._playlist_backend)
+        self.backends.register("extractor", self._extractor_backend)
 
     def session_dir(self, session_id: str) -> Path:
         path = data_dir() / "downloads" / session_id
@@ -39,13 +49,24 @@ class DownloadManager:
         rendition_index: int | None = None,
         referer: str | None = None,
     ) -> dict:
+        plan = plan_for(variant)
+        key = (session_id, variant["id"])
+        if plan.metadata.get("file_preview"):
+            previous = self._preview_jobs.get(key)
+            cached = self.store.get_download(session_id, previous) if previous else None
+            if cached and (cached["id"] in self._tasks or
+                           (cached["state"] == "COMPLETED" and Path(cached["path"]).is_file())):
+                return cached
         filename = safe_filename(variant.get("group_title") or variant.get("label") or "media", variant["url"])
+        if plan.metadata.get("ext"):
+            filename = _split_ext(filename)[0] + "." + plan.metadata["ext"]
         if rendition_index is not None:
             stem, ext = _split_ext(filename)
             filename = f"{stem}-r{rendition_index}{ext}"
         job_id = uuid.uuid4().hex
         if referer:
             self._referers[job_id] = referer
+        self._plans[job_id] = plan
         job = self.store.insert_download(
             job_id=job_id,
             session_id=session_id,
@@ -56,6 +77,8 @@ class DownloadManager:
         )
         task = asyncio.create_task(self._run(job))
         self._tasks[job_id] = task
+        if plan.metadata.get("file_preview"):
+            self._preview_jobs[key] = job_id
         return job
 
     async def cancel(self, session_id: str, job_id: str) -> dict | None:
@@ -81,6 +104,9 @@ class DownloadManager:
         return current
 
     async def cancel_session(self, session_id: str) -> None:
+        for key in list(self._preview_jobs):
+            if key[0] == session_id:
+                self._preview_jobs.pop(key, None)
         jobs = self.store.list_downloads(session_id)
         for job in jobs:
             if job["state"] not in {"COMPLETED", "FAILED", "CANCELLED"}:
@@ -90,11 +116,9 @@ class DownloadManager:
         session_id = job["session_id"]
         job_id = job["id"]
         try:
-            assert_safe(job["url"])
-            if _is_playlist(job["url"]):
-                await self._run_ffmpeg(job)
-            else:
-                await self._run_http(job)
+            plan = self._plans[job_id]
+            assert_safe(plan.url)
+            await self.backends.execute(job, plan)
         except asyncio.CancelledError:
             self._discard_partial(self.store.get_download(session_id, job_id) or job)
             self.store.update_download(session_id, job_id, state="CANCELLED", error="已取消")
@@ -113,6 +137,59 @@ class DownloadManager:
         finally:
             self._tasks.pop(job_id, None)
             self._referers.pop(job_id, None)
+            self._plans.pop(job_id, None)
+            self._cancelled.discard(job_id)
+
+    async def _http_backend(self, job: dict, plan: DownloadPlan) -> None:
+        await self._run_http({**job, "url": plan.url})
+
+    async def _playlist_backend(self, job: dict, plan: DownloadPlan) -> None:
+        await self._run_ffmpeg({**job, "url": plan.url})
+
+    async def _extractor_backend(self, job: dict, plan: DownloadPlan) -> None:
+        sid, job_id = job["session_id"], job["id"]
+        cookies = await self.cookie_provider(sid, plan.url) if self.cookie_provider else []
+        path = self.session_dir(sid) / f"{job_id}-{job['filename']}"
+        self.store.update_download(sid, job_id, state="DOWNLOADING", progress=2, path=str(path))
+        # Each component has its own percentage; keep the visible job monotonic.
+        last_progress = 2.0
+        def progress(value: float) -> None:
+            nonlocal last_progress
+            next_progress = min(95.0, max(last_progress, value * 0.9))
+            if next_progress - last_progress >= 1:
+                last_progress = next_progress
+                self.store.update_download(sid, job_id, state="DOWNLOADING", progress=round(next_progress, 1))
+        def stage(state: str) -> None:
+            self.store.update_download(sid, job_id, state=state, progress=max(95, last_progress))
+
+        await self.extractor.download(plan.url, plan.metadata["selector"], path, cookies, progress, stage)
+        self.store.update_download(sid, job_id, state="COMPLETED", progress=100, path=str(path), error=None)
+
+    async def preview_file(self, session_id: str, variant: dict) -> Path | None:
+        if not variant.get("metadata", {}).get("file_preview"):
+            return None
+        key = (session_id, variant["id"])
+        job_id = self._preview_jobs.get(key)
+        job = self.store.get_download(session_id, job_id) if job_id else None
+        if not job or job["state"] in {"FAILED", "CANCELLED"}:
+            job = self.enqueue(session_id, variant)
+            self._preview_jobs[key] = job["id"]
+        task = self._tasks.get(job["id"])
+        if task:
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise RuntimeError("预览下载已取消") from None
+                raise
+        current = self.store.get_download(session_id, job["id"])
+        if not current or current["state"] != "COMPLETED":
+            raise RuntimeError((current or {}).get("error") or "预览文件未就绪")
+        path = Path(current["path"])
+        if not path.is_file():
+            self._preview_jobs.pop(key, None)
+            raise RuntimeError("预览文件已清理，请重试")
+        return path
 
     def _saved_headers(self, job_id: str) -> dict[str, str]:
         return page_request_headers(self._referers.get(job_id))
@@ -290,11 +367,6 @@ def _split_ext(filename: str) -> tuple[str, str]:
 def _force_mp4(filename: str) -> str:
     stem, _ext = _split_ext(filename)
     return f"{stem}.mp4"
-
-
-def _is_playlist(url: str) -> bool:
-    path = url.split("?", 1)[0].lower()
-    return path.endswith((".m3u8", ".m3u", ".mpd"))
 
 
 async def _probe_duration(url: str) -> float | None:

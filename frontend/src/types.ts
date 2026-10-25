@@ -14,6 +14,8 @@ export type Variant = {
   label: string | null
   is_playlist: boolean
   renditions: Rendition[]
+  adapter?: string | null
+  file_preview?: boolean
   occurrence_count: number
 }
 
@@ -42,4 +44,10 @@ export type CaptureEntry = {
   url: string
   via: string
   at: number
+}
+
+export type AdapterStatus = {
+  state: "loading" | "ready" | "error"
+  adapter: string
+  message: string
 }

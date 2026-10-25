@@ -72,6 +72,11 @@ class DB:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(variants)")}
+        for name, definition in {"source_key": "TEXT", "metadata": "TEXT"}.items():
+            if name not in columns:
+                self._conn.execute(f"ALTER TABLE variants ADD COLUMN {name} {definition}")
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_variant_source ON variants(group_id, source_key)")
         self._conn.commit()
 
     def execute(self, sql: str, params: tuple = ()) -> None:

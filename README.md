@@ -38,6 +38,44 @@ docker compose exec app python /app/scripts/verify.py
 python3 backend/tests/test_logic.py
 ```
 
+完整的后端回归（包括适配器和真实音视频合并；需安装 `backend/requirements.txt`、FFmpeg、Node.js 22）：
+
+```bash
+python3 -m unittest discover -s backend/tests -v
+```
+
+## YouTube
+
+在地址栏打开公开视频（支持 watch、youtu.be、Shorts、embed），视频格式解析完成后会出现在视频仓。按视频 ID 分组，清晰度/编码格式作为变体；播放器的零散分段请求不会另外计数。
+
+解析和下载使用独立的 `yt-dlp` 进程，共享当前 Chromium 会话中该站点的 Cookie，并继承部署环境的代理设置。每次下载重新解析原视频和所选格式，避免使用过期的 CDN 签名地址。独立视频轨会配对音轨，由 FFmpeg 合成 MP4；不会把单独的静音画面当作完整视频。
+
+首次点击预览会先下载并合并所选格式，进度和错误可在下载列表查看；完成后的文件支持 Range 预览，预览和下载复用同一任务。切换页面会取消未完成的格式解析，关闭会话会取消任务、删除临时 Cookie 和下载文件。需要登录或验证时，先在目标浏览器完成，再刷新页面重试。
+
+当前支持点播，不支持录制直播或下载 DRM 内容。站点风控、地区限制、账号权限及网络出口仍会影响可用性。开发环境对 YouTube 的访问被代理以 403 拒绝，因此线上 YouTube 端到端尚未验证；本地集成测试使用真实 `yt-dlp` / FFmpeg 下载独立音视频样例，检查合并后的双轨 MP4 和 Range 预览，不能替代线上验证。
+
+### 扩展站点和下载后端
+
+- `backend/app/adapters/base.py` 定义站点协议和注册表；在 `adapters/__init__.py` 注册适配器。实现页面识别、Cookie 作用域、媒体请求归属和资源解析，不需要改浏览器里的站点分支。
+- 适配器返回 `MediaResource`：稳定资源键、分组键、清晰度和无凭据的下载元数据。`Store.ingest_resolved()` 更新已有资源地址，保留选择使用的 ID。
+- `backend/app/media/backends.py` 根据下载计划分发后端；`DownloadManager` 注册 `http`、`playlist`、`extractor`。新增下载方式通过 `register()` 接入，核心任务生命周期不识别站点名称。
+- `media/extractor.py` 封装提取进程、私有 Cookie 临时文件、进度、超时及整个进程组的取消。运行时依赖版本固定在 `requirements.txt`；YouTube 规则变化时需升级 `yt-dlp` 并重新回归。
+
+## B 站与抖音
+
+两站都通过注册的独立适配器接入，和 YouTube 共用 `ExtractedVideoAdapter` 的格式转换、音视频配对和提取下载后端，不在浏览器或下载管理器中判断站点名称。
+
+| 站点 | 可识别的入口 | 处理方式 |
+| --- | --- | --- |
+| B 站 | 桌面/手机 BV、AV 视频页、嵌入播放器，支持 `p` / `page` 参数 | AV/BV 归一化；每个分 P 独立分组；DASH 音视频合并，兼容旧式单文件 MP4 |
+| 抖音 | `/video/视频ID`、`iesdouyin.com/share/video/视频ID`、带 `modal_id` 的页面 | 按作品 ID 分组；同一作品的分享和弹层链接统一；直接音视频文件复用下载后端 |
+
+`b23.tv`、`v.douyin.com` 短链由目标浏览器正常跳转，落到上述视频页面后识别。不含具体视频 ID 的首页/信息流保留原有浏览器捕获方式，不批量解析推荐列表。点播格式解析失败时，会恢复已缓存及后续的浏览器媒体捕获，避免站点适配失败导致已播放资源丢失；这些原始捕获不代表已经获得完整合并视频。
+
+两站分别读取当前浏览器中 B 站或抖音的 Cookie。登录、验证码、地区和清晰度权限由站点决定，先在目标浏览器确认视频可以正常播放，再刷新页面。暂不支持直播、DRM、整合集、B 站旧版多段 FLV、抖音图集和不可播放的 bytevc2 格式。
+
+本次实测：两站的公开视频页面都能返回 HTTP 200 并建立浏览器 Cookie；B 站解析仍遇到播放器信息不可读/不可用，抖音接口仍要求有效的验证 Cookie，因此尚未完成两站真实视频的在线下载验收。自动回归覆盖链接识别、分 P、格式配对、过期地址刷新、捕获回退及原有本地真实合并链路。
+
 ## 接口
 
 - `POST /api/sessions`：创建或返回当前唯一会话

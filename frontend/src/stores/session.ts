@@ -1,7 +1,7 @@
 import { defineStore } from "pinia"
 import { computed, ref } from "vue"
 import { request } from "../api"
-import type { CaptureEntry, DownloadJob, Group, Variant } from "../types"
+import type { AdapterStatus, CaptureEntry, DownloadJob, Group, Variant } from "../types"
 
 type SessionPayload = {
   id: string
@@ -29,6 +29,7 @@ export const useSessionStore = defineStore("session", () => {
   const browserPid = ref<number | null>(null)
   const launchCount = ref<number | null>(null)
   const error = ref("")
+  const adapterStatus = ref<AdapterStatus | null>(null)
   const selected = ref<Record<string, boolean>>({})
   const lastCopied = ref("")
   const modalKind = ref<"image" | "video" | null>(null)
@@ -68,9 +69,15 @@ export const useSessionStore = defineStore("session", () => {
     groups?: Group[]
     downloads?: DownloadJob[]
     current_url?: string
+    adapter_status?: AdapterStatus | null
     browser_pid?: number
   }) {
+    if (event.type === "adapter.status") {
+      adapterStatus.value = event.adapter_status || null
+      return
+    }
     if (event.type === "snapshot") {
+      adapterStatus.value = event.adapter_status || null
       groups.value = event.groups || []
       downloads.value = event.downloads || []
       if (!log.value.length) {
@@ -263,6 +270,7 @@ export const useSessionStore = defineStore("session", () => {
     browserPid,
     launchCount,
     error,
+    adapterStatus,
     selected,
     lastCopied,
     modalKind,

@@ -40,6 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY scripts/gen_media.py /app/scripts/gen_media.py
 RUN python3 /app/scripts/gen_media.py /app/demo-media
 
+COPY --from=web /usr/local/bin/node /usr/local/bin/node
+
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
