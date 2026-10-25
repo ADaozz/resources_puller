@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.db import DB
+from app.media.fetch import page_request_headers
 from app.hub import Hub
 from app.resources.classify import classify
 from app.resources.normalize import identity_for, normalize_stem
@@ -14,6 +15,17 @@ from app.resources.playlist import parse_m3u8, parse_mpd
 from app.resources.store import Store
 from app.security.ssrf import SSRFError, assert_safe, clear_cache, ip_allowed
 import ipaddress
+
+
+class PageHeaderTests(unittest.TestCase):
+    def test_http_page_becomes_referer(self) -> None:
+        headers = page_request_headers("https://www.douyin.com/jingxuan")
+        self.assertEqual(headers, {"Referer": "https://www.douyin.com/jingxuan"})
+
+    def test_blank_and_injected_lines_are_dropped(self) -> None:
+        self.assertEqual(page_request_headers(""), {})
+        self.assertEqual(page_request_headers("about:blank"), {})
+        self.assertEqual(page_request_headers("https://example.com/\r\nX-Evil: 1"), {"Referer": "https://example.com/X-Evil: 1"})
 
 
 class NormalizeTests(unittest.TestCase):

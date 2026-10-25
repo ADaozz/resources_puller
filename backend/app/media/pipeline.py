@@ -9,7 +9,7 @@ from pathlib import Path
 
 from app.config import data_dir
 from app.hub import Hub
-from app.media.fetch import open_response
+from app.media.fetch import open_response, page_request_headers
 from app.resources.classify import extension_of
 from app.resources.store import Store
 from app.security.ssrf import SSRFError, assert_safe
@@ -25,6 +25,7 @@ class DownloadManager:
         self.hub = hub
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancelled: set[str] = set()
+        self._referers: dict[str, str] = {}
 
     def session_dir(self, session_id: str) -> Path:
         path = data_dir() / "downloads" / session_id
@@ -36,12 +37,15 @@ class DownloadManager:
         session_id: str,
         variant: dict,
         rendition_index: int | None = None,
+        referer: str | None = None,
     ) -> dict:
         filename = safe_filename(variant.get("group_title") or variant.get("label") or "media", variant["url"])
         if rendition_index is not None:
             stem, ext = _split_ext(filename)
             filename = f"{stem}-r{rendition_index}{ext}"
         job_id = uuid.uuid4().hex
+        if referer:
+            self._referers[job_id] = referer
         job = self.store.insert_download(
             job_id=job_id,
             session_id=session_id,
@@ -108,12 +112,16 @@ class DownloadManager:
             )
         finally:
             self._tasks.pop(job_id, None)
+            self._referers.pop(job_id, None)
+
+    def _saved_headers(self, job_id: str) -> dict[str, str]:
+        return page_request_headers(self._referers.get(job_id))
 
     async def _run_http(self, job: dict) -> None:
         session_id = job["session_id"]
         job_id = job["id"]
         self.store.update_download(session_id, job_id, state="PROBING", progress=1)
-        client, response, _final = await open_response(job["url"])
+        client, response, _final = await open_response(job["url"], headers=self._saved_headers(job_id))
         path = self.session_dir(session_id) / f"{job_id}-{job['filename']}"
         try:
             if response.status_code >= 400:
@@ -152,9 +160,14 @@ class DownloadManager:
         duration = await _probe_duration(job["url"])
         path = self.session_dir(session_id) / f"{job_id}-{_force_mp4(job['filename'])}"
         self.store.update_download(session_id, job_id, state="MERGING", progress=8, path=str(path))
+        header_args = []
+        saved = self._saved_headers(job_id)
+        if saved:
+            header_args = ["-headers", "".join(f"{key}: {value}\r\n" for key, value in saved.items())]
         cmd = [
             "ffmpeg",
             "-y",
+            *header_args,
             "-allowed_extensions",
             "ALL",
             "-i",
@@ -180,6 +193,7 @@ class DownloadManager:
             fallback = [
                 "ffmpeg",
                 "-y",
+                *header_args,
                 "-allowed_extensions",
                 "ALL",
                 "-i",
@@ -309,7 +323,11 @@ async def _probe_duration(url: str) -> float | None:
     return value or None
 
 
-async def ensure_poster(url: str, variant_id: str) -> Path | None:
+async def ensure_poster(
+    url: str,
+    variant_id: str,
+    headers: dict[str, str] | None = None,
+) -> Path | None:
     try:
         assert_safe(url)
     except SSRFError:
@@ -318,9 +336,13 @@ async def ensure_poster(url: str, variant_id: str) -> Path | None:
     if dest.exists() and dest.stat().st_size > 0:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
+    header_args: list[str] = []
+    if headers:
+        header_args = ["-headers", "".join(f"{key}: {value}\r\n" for key, value in headers.items())]
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-y",
+        *header_args,
         "-ss",
         "0.2",
         "-i",

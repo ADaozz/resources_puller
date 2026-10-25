@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.browser.manager import descendant_has_chromium
 from app.demo_site import local_media_file
-from app.media.fetch import open_response, read_text
+from app.media.fetch import open_response, page_request_headers, read_text
 from app.media.pipeline import ensure_poster
 from app.media.rewrite import rewrite_m3u8
 from app.security.ssrf import SSRFError, assert_safe
@@ -48,6 +48,13 @@ def _session_or_404(request: Request, session_id: str):
     if not browser.session or browser.session.id != session_id:
         raise HTTPException(404, "会话不存在")
     return browser
+
+
+def _page_headers(request: Request, session_id: str) -> dict[str, str]:
+    browser = _browser(request)
+    if not browser.session or browser.session.id != session_id:
+        return {}
+    return page_request_headers(browser.session.current_url)
 
 
 @router.get("/api/health")
@@ -155,7 +162,14 @@ async def create_downloads(session_id: str, body: DownloadIn, request: Request) 
             assert_safe(variant["url"])
         except SSRFError as exc:
             raise HTTPException(400, str(exc)) from exc
-        created.append(manager.enqueue(session_id, variant, item.rendition_index))
+        created.append(
+            manager.enqueue(
+                session_id,
+                variant,
+                item.rendition_index,
+                referer=_browser(request).session.current_url if _browser(request).session else None,
+            )
+        )
     return {"downloads": created}
 
 
@@ -193,8 +207,9 @@ async def preview(session_id: str, variant_id: str, request: Request):
         raise HTTPException(400, str(exc)) from exc
     if _is_m3u8(url, variant.get("mime")):
         text = _read_playlist(url)
+        page_headers = _page_headers(request, session_id)
         if text is None:
-            text, _mime = await read_text(url)
+            text, _mime = await read_text(url, headers=page_headers)
         return Response(rewrite_m3u8(text, url, session_id), media_type="application/vnd.apple.mpegurl")
     if _is_mpd(url, variant.get("mime")):
         path = await _ensure_dash_mp4(url, variant_id)
@@ -202,7 +217,7 @@ async def preview(session_id: str, variant_id: str, request: Request):
     local = local_media_file(url)
     if local:
         return FileResponse(local)
-    return await _stream(url, request)
+    return await _stream(url, request, _page_headers(request, session_id))
 
 
 @router.get("/api/sessions/{session_id}/variants/{variant_id}/poster")
@@ -211,7 +226,7 @@ async def poster(session_id: str, variant_id: str, request: Request):
     variant = _store(request).get_variant(session_id, variant_id)
     if not variant:
         raise HTTPException(404, "资源不存在")
-    path = await ensure_poster(variant["url"], variant_id)
+    path = await ensure_poster(variant["url"], variant_id, headers=_page_headers(request, session_id))
     if not path:
         raise HTTPException(404, "暂无封面")
     return FileResponse(path, media_type="image/jpeg")
@@ -227,15 +242,16 @@ async def media_proxy(session_id: str, url: str, request: Request):
         raise HTTPException(400, str(exc)) from exc
     if not store.known_or_playlist_origin(session_id, url):
         raise HTTPException(403, "只代理已捕获的资源或其同源分片")
+    page_headers = _page_headers(request, session_id)
     if _is_m3u8(url, None):
         text = _read_playlist(url)
         if text is None:
-            text, _mime = await read_text(url)
+            text, _mime = await read_text(url, headers=page_headers)
         return Response(rewrite_m3u8(text, url, session_id), media_type="application/vnd.apple.mpegurl")
     local = local_media_file(url)
     if local:
         return FileResponse(local)
-    return await _stream(url, request)
+    return await _stream(url, request, page_headers)
 
 
 @router.get("/api/sessions/{session_id}/debug")
@@ -339,8 +355,12 @@ async def _ensure_dash_mp4(url: str, variant_id: str) -> Path:
     return dest
 
 
-async def _stream(url: str, request: Request) -> StreamingResponse:
-    headers = {}
+async def _stream(
+    url: str,
+    request: Request,
+    extra_headers: dict[str, str] | None = None,
+) -> StreamingResponse:
+    headers = dict(extra_headers or {})
     if request.headers.get("range"):
         headers["Range"] = request.headers["range"]
     client, response, _final = await open_response(url, headers=headers)
