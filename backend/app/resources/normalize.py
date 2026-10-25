@@ -14,7 +14,38 @@ _TRAIL_H = re.compile(
 )
 
 
-def split_url(url: str) -> tuple[str, str, str, str]:
+_PROCESS = re.compile(
+    r"(?i)^(?P<w>\d{2,5})w_(?P<h>\d{2,5})h"
+    r"|^(?P<wx>\d{2,5})[xX](?P<hx>\d{2,5})"
+    r"|^(?P<scale>[1-4])x(?:[_\-.]|$)"
+)
+
+
+def peel_processor(filename: str) -> tuple[str, str | None, int | None, int | None]:
+    """把 name.jpg@3840w_360h_1c.avif 还原成 name.jpg，尺寸记成变体。
+
+    @ 后面不是分辨率时保持原名，避免把不确定的名字并到一起。
+    """
+    if "@" not in filename:
+        return filename, None, None, None
+    base, _, tail = filename.partition("@")
+    if not base:
+        return filename, None, None, None
+    matched = _PROCESS.match(tail)
+    if not matched:
+        return filename, None, None, None
+    if matched.group("w"):
+        width = int(matched.group("w"))
+        height = int(matched.group("h"))
+        return base, f"{width}x{height}", width, height
+    if matched.group("wx"):
+        width = int(matched.group("wx"))
+        height = int(matched.group("hx"))
+        return base, f"{width}x{height}", width, height
+    return base, f"{matched.group('scale')}x", None, None
+
+
+def split_url(url: str) -> tuple[str, str, str, str, str | None, int | None, int | None]:
     parts = urlparse(url)
     host = (parts.hostname or "").lower()
     path = unquote(parts.path or "")
@@ -22,12 +53,13 @@ def split_url(url: str) -> tuple[str, str, str, str]:
         path = path[:-1]
     directory, _, filename = path.rpartition("/")
     directory = directory or "/"
-    if "." in filename:
-        stem, ext = filename.rsplit(".", 1)
+    base, proc_label, proc_w, proc_h = peel_processor(filename)
+    if "." in base:
+        stem, ext = base.rsplit(".", 1)
         ext = "." + ext.lower()
     else:
-        stem, ext = filename, ""
-    return host, directory, stem, ext
+        stem, ext = base, ""
+    return host, directory, stem, ext, proc_label, proc_w, proc_h
 
 
 def normalize_stem(stem: str) -> tuple[str, str | None, int | None, int | None]:
@@ -73,9 +105,15 @@ def normalize_stem(stem: str) -> tuple[str, str | None, int | None, int | None]:
 
 
 def identity_for(url: str, kind: str) -> tuple[str, str, str | None, int | None, int | None]:
-    host, directory, stem, ext = split_url(url)
+    host, directory, stem, ext, proc_label, proc_w, proc_h = split_url(url)
     normalized, label, width, height = normalize_stem(stem)
+    if proc_label:
+        label = proc_label
+        width = proc_w if proc_w is not None else width
+        height = proc_h if proc_h is not None else height
     generic = {"master", "index", "playlist", "manifest", "video", "media"}
     title = normalized if normalized not in generic else directory.rstrip("/").rsplit("/", 1)[-1] or normalized
+    # 扩展名用处理后缀之前的原始后缀，这样 jpg 再转成 webp/avif 仍是同一组。
+    # 主机和目录留在键里：不同位置的同名文件不确定是不是同一资源，分开。
     key = f"{kind}|{host}|{directory}|{normalized}|{ext}"
     return key, title or normalized or "resource", label, width, height
